@@ -2,7 +2,7 @@
 GME Remit Payments Portal — Full Automation
 URL  : https://payments.gmeremit.com/
 Flow : Login → KRW → Transactions → Transaction Detail
-       → Custom Date Range (from date_range.xlsx) → Filter → Export Excel (All Pages)
+       → Custom Date Range → Filter → Export Excel (All Pages) → S3 Upload
 """
 
 import asyncio
@@ -24,14 +24,23 @@ except ImportError:
 from playwright.async_api import async_playwright, Page
 
 # ── Config ────────────────────────────────────────────────────────────
+_headless = os.environ.get("GME_HEADLESS", "false").lower() == "true"
+
 CONFIG = {
     "USERNAME":     os.environ.get("GME_USERNAME", "Adarsh_T"),
     "PASSWORD":     os.environ.get("GME_PASSWORD", "Adarsh_T@321"),
-    "HEADLESS":     False,
-    "SLOW_MO":      120,
+    "HEADLESS":     _headless,
+    "SLOW_MO":      0 if _headless else 120,
     "DATE_SHEET":   os.environ.get("GME_DATE_SHEET", "date_range.xlsx"),
     "DOWNLOAD_DIR": os.path.join(os.path.dirname(os.path.abspath(__file__)), "gmeremit_downloads"),
 }
+
+# S3 config (used when UPLOAD_S3=true)
+S3_BUCKET         = os.environ.get("S3_BUCKET", "payout-recon")
+S3_PREFIX         = os.environ.get("S3_PREFIX", "gme/payout/raw_daily")
+AWS_REGION        = os.environ.get("AWS_REGION", "ap-southeast-1")
+AWS_ACCESS_KEY_ID = os.environ.get("AWS_ACCESS_KEY_ID", "")
+AWS_SECRET_KEY    = os.environ.get("AWS_SECRET_ACCESS_KEY", "")
 
 LOGIN_URL      = "https://payments.gmeremit.com/"
 SCREENSHOT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gmeremit_screenshots")
@@ -50,6 +59,7 @@ window.navigator.permissions.query = p =>
 """
 
 
+# ── Helpers ───────────────────────────────────────────────────────────
 async def shot(page: Page, name: str):
     os.makedirs(SCREENSHOT_DIR, exist_ok=True)
     path = os.path.join(SCREENSHOT_DIR, f"{name}.png")
@@ -61,6 +71,13 @@ async def shot(page: Page, name: str):
 
 
 def read_date_ranges(sheet_path: str) -> list[tuple[str, str]]:
+    # Allow direct env-var override — used by GitHub Actions
+    start = os.environ.get("START_DATE")
+    end   = os.environ.get("END_DATE")
+    if start and end:
+        print(f"[SHEET] Using env vars: {start} → {end}")
+        return [(start, end)]
+
     wb = openpyxl.load_workbook(sheet_path, data_only=True)
     ws = wb.active
     rows = list(ws.iter_rows(values_only=True))
@@ -95,6 +112,31 @@ def read_date_ranges(sheet_path: str) -> list[tuple[str, str]]:
     return pairs
 
 
+def upload_to_s3(local_dir: str, end_date: str):
+    try:
+        import boto3
+    except ImportError:
+        print("[S3] boto3 not installed — skipping upload.")
+        return
+
+    s3_key_prefix = f"{S3_PREFIX}/{end_date}"
+    client_kwargs = {"region_name": AWS_REGION}
+    if AWS_ACCESS_KEY_ID and AWS_SECRET_KEY:
+        client_kwargs["aws_access_key_id"]     = AWS_ACCESS_KEY_ID
+        client_kwargs["aws_secret_access_key"] = AWS_SECRET_KEY
+
+    s3 = boto3.client("s3", **client_kwargs)
+    uploaded = 0
+    for fpath in Path(local_dir).glob("*"):
+        if fpath.is_file():
+            key = f"{s3_key_prefix}/{fpath.name}"
+            print(f"[S3] Uploading {fpath.name} → s3://{S3_BUCKET}/{key}")
+            s3.upload_file(str(fpath), S3_BUCKET, key)
+            uploaded += 1
+    print(f"[S3] Uploaded {uploaded} file(s) to s3://{S3_BUCKET}/{s3_key_prefix}/")
+
+
+# ── Step: Login ───────────────────────────────────────────────────────
 async def do_login(page: Page) -> bool:
     print("\n[LOGIN] Navigating to GME Remit portal...")
     await page.goto(LOGIN_URL, wait_until="domcontentloaded")
@@ -148,6 +190,7 @@ async def do_login(page: Page) -> bool:
     return True
 
 
+# ── Step: Click KRW ──────────────────────────────────────────────────
 async def click_krw(page: Page) -> bool:
     print("\n[KRW] Looking for KRW selector...")
     await page.wait_for_timeout(2000)
@@ -178,6 +221,7 @@ async def click_krw(page: Page) -> bool:
     return False
 
 
+# ── Step: Navigate to Transaction Detail ─────────────────────────────
 async def go_to_transaction_detail(page: Page) -> bool:
     print("\n[NAV] Clicking Transactions in top bar...")
     await shot(page, "06_before_transactions")
@@ -217,8 +261,8 @@ async def go_to_transaction_detail(page: Page) -> bool:
     return True
 
 
+# ── Step: Set Date Range & Export ─────────────────────────────────────
 def to_portal_date(date_str: str) -> str:
-    """Convert any date string to YYYY-MM-DD (portal's datepicker format)."""
     from datetime import datetime
     for fmt in ("%m/%d/%Y", "%d/%m/%Y", "%Y-%m-%d", "%Y/%m/%d", "%d-%m-%Y", "%m-%d-%Y"):
         try:
@@ -229,7 +273,6 @@ def to_portal_date(date_str: str) -> str:
 
 
 async def set_datepicker(page: Page, field_id: str, date_value: str, label: str) -> bool:
-    """Bypass readonly on jQuery datepicker and set value directly via JS."""
     result = await page.evaluate(f"""
         () => {{
             const el = document.getElementById('{field_id}');
@@ -295,39 +338,44 @@ async def set_date_and_export(page: Page, start_date: str, end_date: str) -> boo
     for sel in ['text=All Pages', 'span:has-text("All Pages")', 'li:has-text("All Pages")',
                 'a:has-text("All Pages")', 'button:has-text("All Pages")']:
         try:
-            await page.click(sel, timeout=4000)
-            print(f"[EXPORT] All Pages clicked via: {sel}")
-            await page.wait_for_timeout(5000)
+            async with page.expect_download(timeout=30000) as dl_info:
+                await page.click(sel, timeout=4000)
+            download = await dl_info.value
+            filename = download.suggested_filename or f"gme_{from_val}_{to_val}.xlsx"
+            save_path = os.path.join(CONFIG["DOWNLOAD_DIR"], filename)
+            await download.save_as(save_path)
+            print(f"[EXPORT] Downloaded: {save_path}")
             await shot(page, f"13_exported_{start_date.replace('/', '-')}_{end_date.replace('/', '-')}")
-            print(f"[EXPORT] Done for {start_date} → {end_date}")
             return True
         except Exception:
             continue
 
-    print("[EXPORT] ERROR: 'All Pages' not found.")
+    print("[EXPORT] ERROR: 'All Pages' not found or download failed.")
     await shot(page, "fail_all_pages")
     return False
 
 
+# ── Main ──────────────────────────────────────────────────────────────
 async def main():
     os.makedirs(CONFIG["DOWNLOAD_DIR"], exist_ok=True)
 
-    sheet_path = CONFIG["DATE_SHEET"]
-    if not Path(sheet_path).exists():
+    date_ranges = read_date_ranges(CONFIG["DATE_SHEET"])
+    if not date_ranges:
         sys.exit(
-            f"\n[ERROR] Date range sheet not found: {sheet_path}\n"
-            f"  Create '{sheet_path}' with columns: start_date | end_date\n"
+            "[ERROR] No dates found. Set START_DATE & END_DATE env vars, "
+            f"or create '{CONFIG['DATE_SHEET']}' with columns: start_date | end_date"
         )
 
-    date_ranges = read_date_ranges(sheet_path)
-    if not date_ranges:
-        sys.exit("[ERROR] No date ranges found in sheet.")
+    # Add --no-sandbox for GitHub Actions
+    browser_args = ["--disable-blink-features=AutomationControlled"]
+    if CONFIG["HEADLESS"]:
+        browser_args += ["--no-sandbox", "--disable-dev-shm-usage"]
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=CONFIG["HEADLESS"],
             slow_mo=CONFIG["SLOW_MO"],
-            args=["--disable-blink-features=AutomationControlled"],
+            args=browser_args,
             downloads_path=CONFIG["DOWNLOAD_DIR"],
         )
         context = await browser.new_context(
@@ -352,6 +400,7 @@ async def main():
         if not await go_to_transaction_detail(page):
             await browser.close(); sys.exit(1)
 
+        last_end = None
         for i, (start_date, end_date) in enumerate(date_ranges, 1):
             print(f"\n{'='*55}")
             print(f"  Processing range {i}/{len(date_ranges)}: {start_date} → {end_date}")
@@ -359,11 +408,16 @@ async def main():
             success = await set_date_and_export(page, start_date, end_date)
             if not success:
                 print(f"[WARNING] Export failed for {start_date} → {end_date}. Continuing...")
+            last_end = end_date
             await page.wait_for_timeout(3000)
 
-        print(f"\n[DONE] All ranges processed. Downloads → {CONFIG['DOWNLOAD_DIR']}")
-        await page.wait_for_timeout(3000)
         await browser.close()
+
+    print(f"\n[DONE] All ranges processed. Downloads → {CONFIG['DOWNLOAD_DIR']}")
+
+    if os.environ.get("UPLOAD_S3", "false").lower() == "true":
+        print("\n[S3] Uploading downloads...")
+        upload_to_s3(CONFIG["DOWNLOAD_DIR"], to_portal_date(last_end or "unknown"))
 
 
 if __name__ == "__main__":
