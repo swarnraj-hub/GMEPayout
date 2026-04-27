@@ -1,0 +1,370 @@
+"""
+GME Remit Payments Portal — Full Automation
+URL  : https://payments.gmeremit.com/
+Flow : Login → KRW → Transactions → Transaction Detail
+       → Custom Date Range (from date_range.xlsx) → Filter → Export Excel (All Pages)
+"""
+
+import asyncio
+import os
+import sys
+from pathlib import Path
+
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
+try:
+    import openpyxl
+except ImportError:
+    sys.exit("Missing dependency: pip install openpyxl")
+
+from playwright.async_api import async_playwright, Page
+
+# ── Config ────────────────────────────────────────────────────────────
+CONFIG = {
+    "USERNAME":     os.environ.get("GME_USERNAME", "Adarsh_T"),
+    "PASSWORD":     os.environ.get("GME_PASSWORD", "Adarsh_T@321"),
+    "HEADLESS":     False,
+    "SLOW_MO":      120,
+    "DATE_SHEET":   os.environ.get("GME_DATE_SHEET", "date_range.xlsx"),
+    "DOWNLOAD_DIR": os.path.join(os.path.dirname(os.path.abspath(__file__)), "gmeremit_downloads"),
+}
+
+LOGIN_URL      = "https://payments.gmeremit.com/"
+SCREENSHOT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gmeremit_screenshots")
+
+STEALTH_JS = """
+Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+if (!window.chrome) {
+    window.chrome = { runtime:{}, loadTimes:function(){}, csi:function(){}, app:{} };
+}
+const _origQuery = window.navigator.permissions.query;
+window.navigator.permissions.query = p =>
+    p.name === 'notifications'
+        ? Promise.resolve({ state: Notification.permission })
+        : _origQuery(p);
+"""
+
+
+async def shot(page: Page, name: str):
+    os.makedirs(SCREENSHOT_DIR, exist_ok=True)
+    path = os.path.join(SCREENSHOT_DIR, f"{name}.png")
+    try:
+        await page.screenshot(path=path, full_page=False)
+        print(f"    [screenshot] {path}")
+    except Exception:
+        pass
+
+
+def read_date_ranges(sheet_path: str) -> list[tuple[str, str]]:
+    wb = openpyxl.load_workbook(sheet_path, data_only=True)
+    ws = wb.active
+    rows = list(ws.iter_rows(values_only=True))
+    if not rows:
+        return []
+
+    header = [str(c).strip().lower() if c else "" for c in rows[0]]
+    start_idx = next(
+        (i for i, h in enumerate(header) if h in ("start_date", "start date", "from", "from date")), 0
+    )
+    end_idx = next(
+        (i for i, h in enumerate(header) if h in ("end_date", "end date", "to", "to date")), 1
+    )
+
+    pairs = []
+    for row in rows[1:]:
+        if not row or all(v is None for v in row):
+            continue
+        start_raw = row[start_idx] if len(row) > start_idx else None
+        end_raw   = row[end_idx]   if len(row) > end_idx   else None
+        if start_raw is None or end_raw is None:
+            continue
+
+        def fmt(v):
+            if hasattr(v, "strftime"):
+                return v.strftime("%m/%d/%Y")
+            return str(v).strip()
+
+        pairs.append((fmt(start_raw), fmt(end_raw)))
+
+    print(f"[SHEET] Loaded {len(pairs)} date range(s) from {sheet_path}")
+    return pairs
+
+
+async def do_login(page: Page) -> bool:
+    print("\n[LOGIN] Navigating to GME Remit portal...")
+    await page.goto(LOGIN_URL, wait_until="domcontentloaded")
+    await page.wait_for_timeout(3000)
+    await shot(page, "01_landing")
+
+    user_sel = (
+        'input[name="username"], input[name="email"], input[name="id"], '
+        'input[placeholder*="username" i], input[placeholder*="email" i], '
+        'input[placeholder*="id" i], input[type="text"]:visible'
+    )
+    try:
+        await page.wait_for_selector(user_sel, timeout=15000)
+        await page.fill(user_sel, CONFIG["USERNAME"])
+    except Exception as e:
+        print(f"[LOGIN] ERROR: Username input not found — {e}")
+        await shot(page, "fail_username")
+        return False
+
+    await page.wait_for_timeout(400)
+
+    try:
+        await page.wait_for_selector('input[type="password"]', timeout=10000)
+        await page.fill('input[type="password"]', CONFIG["PASSWORD"])
+    except Exception as e:
+        print(f"[LOGIN] ERROR: Password input not found — {e}")
+        await shot(page, "fail_password")
+        return False
+
+    await shot(page, "02_credentials_filled")
+
+    try:
+        await page.click(
+            'button[type="submit"], input[type="submit"], '
+            'button:has-text("Login"), button:has-text("Sign In"), button:has-text("Log In")',
+            timeout=5000,
+        )
+    except Exception:
+        await page.keyboard.press("Enter")
+
+    await page.wait_for_timeout(5000)
+    await shot(page, "03_after_login")
+
+    page_text = (await page.inner_text("body")).lower()
+    for err in ("invalid", "incorrect", "wrong password", "login failed"):
+        if err in page_text:
+            print(f"[LOGIN] ERROR: '{err}' detected on page.")
+            return False
+
+    print(f"[LOGIN] SUCCESS — URL: {page.url}")
+    return True
+
+
+async def click_krw(page: Page) -> bool:
+    print("\n[KRW] Looking for KRW selector...")
+    await page.wait_for_timeout(2000)
+    await shot(page, "04_before_krw")
+
+    try:
+        await page.click("text=KRW", timeout=8000)
+        print("[KRW] Clicked KRW.")
+        await page.wait_for_timeout(2000)
+        await shot(page, "05_after_krw")
+        return True
+    except Exception:
+        pass
+
+    for sel in ['a:has-text("KRW")', 'button:has-text("KRW")', 'li:has-text("KRW")',
+                'span:has-text("KRW")', '[class*="tab"]:has-text("KRW")']:
+        try:
+            await page.click(sel, timeout=4000)
+            print(f"[KRW] Clicked KRW via: {sel}")
+            await page.wait_for_timeout(2000)
+            await shot(page, "05_after_krw")
+            return True
+        except Exception:
+            continue
+
+    print("[KRW] ERROR: Could not find KRW element.")
+    await shot(page, "fail_krw")
+    return False
+
+
+async def go_to_transaction_detail(page: Page) -> bool:
+    print("\n[NAV] Clicking Transactions in top bar...")
+    await shot(page, "06_before_transactions")
+
+    for sel in ['nav a:has-text("Transaction")', 'a:has-text("Transaction")',
+                'button:has-text("Transaction")', 'li:has-text("Transaction")']:
+        try:
+            await page.click(sel, timeout=5000)
+            print(f"[NAV] Clicked Transactions via: {sel}")
+            await page.wait_for_timeout(2000)
+            break
+        except Exception:
+            continue
+    else:
+        print("[NAV] ERROR: Transactions menu not found.")
+        await shot(page, "fail_transactions")
+        return False
+
+    await shot(page, "07_after_transactions_click")
+
+    for sel in ['a:has-text("Transaction Detail")', 'li:has-text("Transaction Detail")',
+                'button:has-text("Transaction Detail")', 'a:has-text("Detail")']:
+        try:
+            await page.click(sel, timeout=5000)
+            print(f"[NAV] Clicked Transaction Detail via: {sel}")
+            await page.wait_for_timeout(3000)
+            break
+        except Exception:
+            continue
+    else:
+        print("[NAV] ERROR: Transaction Detail not found.")
+        await shot(page, "fail_transaction_detail")
+        return False
+
+    await shot(page, "08_transaction_detail_page")
+    print(f"[NAV] On Transaction Detail. URL: {page.url}")
+    return True
+
+
+def to_portal_date(date_str: str) -> str:
+    """Convert any date string to YYYY-MM-DD (portal's datepicker format)."""
+    from datetime import datetime
+    for fmt in ("%m/%d/%Y", "%d/%m/%Y", "%Y-%m-%d", "%Y/%m/%d", "%d-%m-%Y", "%m-%d-%Y"):
+        try:
+            return datetime.strptime(date_str.strip(), fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    return date_str
+
+
+async def set_datepicker(page: Page, field_id: str, date_value: str, label: str) -> bool:
+    """Bypass readonly on jQuery datepicker and set value directly via JS."""
+    result = await page.evaluate(f"""
+        () => {{
+            const el = document.getElementById('{field_id}');
+            if (!el) return 'not_found';
+            el.removeAttribute('readonly');
+            el.value = '{date_value}';
+            el.dispatchEvent(new Event('input',  {{bubbles: true}}));
+            el.dispatchEvent(new Event('change', {{bubbles: true}}));
+            return el.value;
+        }}
+    """)
+    print(f"[DATE] {label} → set to: {result}")
+    return result not in (None, "not_found", "")
+
+
+async def set_date_and_export(page: Page, start_date: str, end_date: str) -> bool:
+    print(f"\n[DATE] Setting date range: {start_date} → {end_date}")
+    await shot(page, f"09_before_date_{start_date.replace('/', '-')}")
+
+    from_val = to_portal_date(start_date)
+    to_val   = to_portal_date(end_date)
+    print(f"[DATE] Converted → From: {from_val}  To: {to_val}")
+
+    await set_datepicker(page, "AgentTransactionPG_fromDate", from_val, "From Date")
+    await page.wait_for_timeout(400)
+    await set_datepicker(page, "AgentTransactionPG_toDate",   to_val,   "To Date")
+    await page.wait_for_timeout(400)
+    await shot(page, "10_dates_entered")
+
+    print("[DATE] Clicking Filter...")
+    for sel in ['button:has-text("Filter")', 'input[value="Filter"]',
+                'button:has-text("Search")', 'button[type="submit"]']:
+        try:
+            await page.click(sel, timeout=5000)
+            print(f"[DATE] Filter clicked via: {sel}")
+            await page.wait_for_timeout(5000)
+            break
+        except Exception:
+            continue
+
+    await shot(page, "11_filtered_results")
+
+    print("[EXPORT] Clicking Excel button...")
+    excel_clicked = False
+    for sel in ['button:has-text("Excel")', 'a:has-text("Excel")', '[class*="excel"]']:
+        try:
+            await page.click(sel, timeout=6000)
+            print(f"[EXPORT] Excel button clicked via: {sel}")
+            excel_clicked = True
+            break
+        except Exception:
+            continue
+
+    if not excel_clicked:
+        print("[EXPORT] ERROR: Excel button not found.")
+        await shot(page, "fail_excel_btn")
+        return False
+
+    await page.wait_for_timeout(2500)
+    await shot(page, "12_excel_dropdown")
+
+    print("[EXPORT] Selecting All Pages...")
+    for sel in ['text=All Pages', 'span:has-text("All Pages")', 'li:has-text("All Pages")',
+                'a:has-text("All Pages")', 'button:has-text("All Pages")']:
+        try:
+            await page.click(sel, timeout=4000)
+            print(f"[EXPORT] All Pages clicked via: {sel}")
+            await page.wait_for_timeout(5000)
+            await shot(page, f"13_exported_{start_date.replace('/', '-')}_{end_date.replace('/', '-')}")
+            print(f"[EXPORT] Done for {start_date} → {end_date}")
+            return True
+        except Exception:
+            continue
+
+    print("[EXPORT] ERROR: 'All Pages' not found.")
+    await shot(page, "fail_all_pages")
+    return False
+
+
+async def main():
+    os.makedirs(CONFIG["DOWNLOAD_DIR"], exist_ok=True)
+
+    sheet_path = CONFIG["DATE_SHEET"]
+    if not Path(sheet_path).exists():
+        sys.exit(
+            f"\n[ERROR] Date range sheet not found: {sheet_path}\n"
+            f"  Create '{sheet_path}' with columns: start_date | end_date\n"
+        )
+
+    date_ranges = read_date_ranges(sheet_path)
+    if not date_ranges:
+        sys.exit("[ERROR] No date ranges found in sheet.")
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=CONFIG["HEADLESS"],
+            slow_mo=CONFIG["SLOW_MO"],
+            args=["--disable-blink-features=AutomationControlled"],
+            downloads_path=CONFIG["DOWNLOAD_DIR"],
+        )
+        context = await browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/121.0.0.0 Safari/537.36"
+            ),
+            viewport={"width": 1440, "height": 900},
+            locale="en-US",
+            accept_downloads=True,
+        )
+        await context.add_init_script(STEALTH_JS)
+        page = await context.new_page()
+
+        if not await do_login(page):
+            await browser.close(); sys.exit(1)
+
+        if not await click_krw(page):
+            await browser.close(); sys.exit(1)
+
+        if not await go_to_transaction_detail(page):
+            await browser.close(); sys.exit(1)
+
+        for i, (start_date, end_date) in enumerate(date_ranges, 1):
+            print(f"\n{'='*55}")
+            print(f"  Processing range {i}/{len(date_ranges)}: {start_date} → {end_date}")
+            print(f"{'='*55}")
+            success = await set_date_and_export(page, start_date, end_date)
+            if not success:
+                print(f"[WARNING] Export failed for {start_date} → {end_date}. Continuing...")
+            await page.wait_for_timeout(3000)
+
+        print(f"\n[DONE] All ranges processed. Downloads → {CONFIG['DOWNLOAD_DIR']}")
+        await page.wait_for_timeout(3000)
+        await browser.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
