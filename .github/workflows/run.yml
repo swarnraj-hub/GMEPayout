@@ -1,0 +1,41 @@
+name: Run GME Automation
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_date:
+        description: "Start Date (YYYY-MM-DD)"
+        required: true
+      end_date:
+        description: "End Date (YYYY-MM-DD)"
+        required: true
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install playwright boto3
+          playwright install
+          playwright install-deps
+
+      - name: Run Script
+        env:
+          GME_USERNAME: ${{ secrets.GME_USERNAME }}
+          GME_PASSWORD: ${{ secrets.GME_PASSWORD }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+
+        run: |
+          python GME.py '{"start_date":"${{ github.event.inputs.start_date }}","end_date":"${{ github.event.inputs.end_date }}"}'
