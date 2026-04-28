@@ -48,6 +48,16 @@ jobs:
           echo "Files in gmeremit_downloads/:"
           ls -lh gmeremit_downloads/ || echo "Directory is empty or missing"
 
+      - name: Check download folder is not empty
+        if: ${{ inputs.upload_s3 == 'true' }}
+        run: |
+          count=$(find gmeremit_downloads/ -maxdepth 1 -type f | wc -l)
+          echo "Files found: $count"
+          if [ "$count" -eq 0 ]; then
+            echo "ERROR: No files downloaded — aborting S3 upload."
+            exit 1
+          fi
+
       - name: Upload to S3
         if: ${{ inputs.upload_s3 == 'true' }}
         env:

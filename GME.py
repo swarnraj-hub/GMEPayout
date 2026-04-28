@@ -374,9 +374,16 @@ async def main():
             print(f"\n{'='*55}")
             print(f"  Processing range {i}/{len(date_ranges)}: {start_date} → {end_date}")
             print(f"{'='*55}")
-            success = await set_date_and_export(page, start_date, end_date)
+            success = False
+            for attempt in range(1, 4):
+                if attempt > 1:
+                    print(f"[RETRY] Attempt {attempt}/3 for {start_date} → {end_date}")
+                    await page.wait_for_timeout(3000)
+                success = await set_date_and_export(page, start_date, end_date)
+                if success:
+                    break
             if not success:
-                print(f"[WARNING] Export failed for {start_date} → {end_date}. Continuing...")
+                print(f"[WARNING] Export failed after 3 attempts for {start_date} → {end_date}. Continuing...")
             last_end = end_date
             await page.wait_for_timeout(3000)
 
