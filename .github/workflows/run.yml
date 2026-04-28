@@ -30,26 +30,36 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install playwright openpyxl boto3
+          pip install playwright openpyxl
           playwright install chromium
           playwright install-deps chromium
 
       - name: Run GME automation
         env:
-          GME_USERNAME:          ${{ secrets.GME_USERNAME }}
-          GME_PASSWORD:          ${{ secrets.GME_PASSWORD }}
-          GME_HEADLESS:          "true"
-          START_DATE:            ${{ inputs.start_date }}
-          END_DATE:              ${{ inputs.end_date }}
-          UPLOAD_S3:             ${{ inputs.upload_s3 }}
-          S3_BUCKET:             ${{ secrets.S3_BUCKET }}
-          S3_PREFIX:             ${{ secrets.S3_PREFIX }}
-          AWS_REGION:            ${{ secrets.AWS_REGION }}
-          AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          GME_USERNAME: ${{ secrets.GME_USERNAME }}
+          GME_PASSWORD: ${{ secrets.GME_PASSWORD }}
+          GME_HEADLESS: "true"
+          START_DATE:   ${{ inputs.start_date }}
+          END_DATE:     ${{ inputs.end_date }}
         run: python GME.py
 
-      - name: Upload downloaded Excel as artifact
+      - name: List downloaded files
+        run: |
+          echo "Files in gmeremit_downloads/:"
+          ls -lh gmeremit_downloads/ || echo "Directory is empty or missing"
+
+      - name: Upload to S3
+        if: ${{ inputs.upload_s3 == 'true' }}
+        env:
+          AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION:    ap-southeast-1
+        run: |
+          echo "Uploading to s3://payout-recon/gme/raw_xlsx/"
+          aws s3 cp gmeremit_downloads/ s3://payout-recon/gme/raw_xlsx/ --recursive
+          echo "Upload complete"
+
+      - name: Upload Excel as artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:

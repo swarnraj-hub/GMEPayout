@@ -8,7 +8,6 @@ Flow : Login → KRW → Transactions → Transaction Detail
 import asyncio
 import os
 import sys
-from pathlib import Path
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -34,13 +33,6 @@ CONFIG = {
     "DATE_SHEET":   os.environ.get("GME_DATE_SHEET", "date_range.xlsx"),
     "DOWNLOAD_DIR": os.path.join(os.path.dirname(os.path.abspath(__file__)), "gmeremit_downloads"),
 }
-
-# S3 config (used when UPLOAD_S3=true)
-S3_BUCKET         = os.environ.get("S3_BUCKET", "payout-recon")
-S3_PREFIX         = os.environ.get("S3_PREFIX", "gme/raw_xlsx")
-AWS_REGION        = os.environ.get("AWS_REGION") or "ap-southeast-1"
-AWS_ACCESS_KEY_ID = os.environ.get("AWS_ACCESS_KEY_ID", "")
-AWS_SECRET_KEY    = os.environ.get("AWS_SECRET_ACCESS_KEY", "")
 
 LOGIN_URL      = "https://payments.gmeremit.com/"
 SCREENSHOT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gmeremit_screenshots")
@@ -111,45 +103,6 @@ def read_date_ranges(sheet_path: str) -> list[tuple[str, str]]:
     print(f"[SHEET] Loaded {len(pairs)} date range(s) from {sheet_path}")
     return pairs
 
-
-def upload_to_s3(local_dir: str, end_date: str):
-    try:
-        import boto3
-    except ImportError:
-        print("[S3] boto3 not installed — skipping upload.")
-        return
-
-    print(f"[S3] Config → bucket={S3_BUCKET!r}  prefix={S3_PREFIX!r}  region={AWS_REGION!r}")
-
-    if not S3_BUCKET:
-        print("[S3] S3_BUCKET is empty — skipping upload.")
-        return
-
-    files = [f for f in Path(local_dir).glob("*") if f.is_file()]
-    print(f"[S3] Files to upload: {[f.name for f in files]}")
-    if not files:
-        print("[S3] No files found in download directory — nothing to upload.")
-        return
-
-    s3_key_prefix = f"{S3_PREFIX}/{end_date}" if S3_PREFIX else f"gme/raw_xlsx/{end_date}"
-    client_kwargs = {"region_name": AWS_REGION or "ap-southeast-1"}
-    if AWS_ACCESS_KEY_ID and AWS_SECRET_KEY:
-        client_kwargs["aws_access_key_id"]     = AWS_ACCESS_KEY_ID
-        client_kwargs["aws_secret_access_key"] = AWS_SECRET_KEY
-
-    try:
-        s3 = boto3.client("s3", **client_kwargs)
-        uploaded = 0
-        for fpath in files:
-            key = f"{s3_key_prefix}/{fpath.name}"
-            print(f"[S3] Uploading {fpath.name} → s3://{S3_BUCKET}/{key}")
-            s3.upload_file(str(fpath), S3_BUCKET, key)
-            print(f"[S3] ✓ Uploaded: s3://{S3_BUCKET}/{key}")
-            uploaded += 1
-        print(f"[S3] Done — {uploaded} file(s) uploaded to s3://{S3_BUCKET}/{s3_key_prefix}/")
-    except Exception as e:
-        print(f"[S3] ERROR: {e}")
-        raise
 
 
 # ── Step: Login ───────────────────────────────────────────────────────
@@ -430,10 +383,6 @@ async def main():
         await browser.close()
 
     print(f"\n[DONE] All ranges processed. Downloads → {CONFIG['DOWNLOAD_DIR']}")
-
-    if os.environ.get("UPLOAD_S3", "false").lower() == "true":
-        print("\n[S3] Uploading downloads...")
-        upload_to_s3(CONFIG["DOWNLOAD_DIR"], to_portal_date(last_end or "unknown"))
 
 
 if __name__ == "__main__":
