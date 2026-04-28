@@ -37,7 +37,7 @@ CONFIG = {
 
 # S3 config (used when UPLOAD_S3=true)
 S3_BUCKET         = os.environ.get("S3_BUCKET", "payout-recon")
-S3_PREFIX         = os.environ.get("S3_PREFIX", "gme/payout/raw_daily")
+S3_PREFIX         = os.environ.get("S3_PREFIX", "gme/raw_xlsx")
 AWS_REGION        = os.environ.get("AWS_REGION") or "ap-southeast-1"
 AWS_ACCESS_KEY_ID = os.environ.get("AWS_ACCESS_KEY_ID", "")
 AWS_SECRET_KEY    = os.environ.get("AWS_SECRET_ACCESS_KEY", "")
@@ -131,7 +131,7 @@ def upload_to_s3(local_dir: str, end_date: str):
         print("[S3] No files found in download directory — nothing to upload.")
         return
 
-    s3_key_prefix = f"{S3_PREFIX}/{end_date}" if S3_PREFIX else f"gme/payout/raw_daily/{end_date}"
+    s3_key_prefix = f"{S3_PREFIX}/{end_date}" if S3_PREFIX else f"gme/raw_xlsx/{end_date}"
     client_kwargs = {"region_name": AWS_REGION or "ap-southeast-1"}
     if AWS_ACCESS_KEY_ID and AWS_SECRET_KEY:
         client_kwargs["aws_access_key_id"]     = AWS_ACCESS_KEY_ID
