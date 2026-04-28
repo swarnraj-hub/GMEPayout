@@ -345,7 +345,6 @@ async def main():
             headless=CONFIG["HEADLESS"],
             slow_mo=CONFIG["SLOW_MO"],
             args=browser_args,
-            downloads_path=CONFIG["DOWNLOAD_DIR"],
         )
         context = await browser.new_context(
             user_agent=(
