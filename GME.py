@@ -119,8 +119,16 @@ def upload_to_s3(local_dir: str, end_date: str):
         print("[S3] boto3 not installed — skipping upload.")
         return
 
+    print(f"[S3] Config → bucket={S3_BUCKET!r}  prefix={S3_PREFIX!r}  region={AWS_REGION!r}")
+
     if not S3_BUCKET:
-        print("[S3] S3_BUCKET not set — skipping upload.")
+        print("[S3] S3_BUCKET is empty — skipping upload.")
+        return
+
+    files = [f for f in Path(local_dir).glob("*") if f.is_file()]
+    print(f"[S3] Files to upload: {[f.name for f in files]}")
+    if not files:
+        print("[S3] No files found in download directory — nothing to upload.")
         return
 
     s3_key_prefix = f"{S3_PREFIX}/{end_date}" if S3_PREFIX else f"gme/payout/raw_daily/{end_date}"
@@ -129,15 +137,19 @@ def upload_to_s3(local_dir: str, end_date: str):
         client_kwargs["aws_access_key_id"]     = AWS_ACCESS_KEY_ID
         client_kwargs["aws_secret_access_key"] = AWS_SECRET_KEY
 
-    s3 = boto3.client("s3", **client_kwargs)
-    uploaded = 0
-    for fpath in Path(local_dir).glob("*"):
-        if fpath.is_file():
+    try:
+        s3 = boto3.client("s3", **client_kwargs)
+        uploaded = 0
+        for fpath in files:
             key = f"{s3_key_prefix}/{fpath.name}"
             print(f"[S3] Uploading {fpath.name} → s3://{S3_BUCKET}/{key}")
             s3.upload_file(str(fpath), S3_BUCKET, key)
+            print(f"[S3] ✓ Uploaded: s3://{S3_BUCKET}/{key}")
             uploaded += 1
-    print(f"[S3] Uploaded {uploaded} file(s) to s3://{S3_BUCKET}/{s3_key_prefix}/")
+        print(f"[S3] Done — {uploaded} file(s) uploaded to s3://{S3_BUCKET}/{s3_key_prefix}/")
+    except Exception as e:
+        print(f"[S3] ERROR: {e}")
+        raise
 
 
 # ── Step: Login ───────────────────────────────────────────────────────

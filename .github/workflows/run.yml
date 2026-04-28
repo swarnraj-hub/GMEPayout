@@ -49,6 +49,14 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         run: python GME.py
 
+      - name: Upload downloaded Excel as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gme-downloads-${{ inputs.start_date }}_${{ inputs.end_date }}
+          path: gmeremit_downloads/
+          retention-days: 7
+
       - name: Upload screenshots on failure
         if: failure()
         uses: actions/upload-artifact@v4
